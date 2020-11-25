@@ -589,7 +589,6 @@ static void save_all(struct task_struct *tsk)
 		__giveup_spe(tsk);
 
 	msr_check_and_clear(msr_all_available);
-	thread_pkey_regs_save(&tsk->thread);
 }
 
 void flush_all_to_thread(struct task_struct *tsk)
@@ -1160,8 +1159,6 @@ static inline void save_sprs(struct thread_struct *t)
 		t->tar = mfspr(SPRN_TAR);
 	}
 #endif
-
-	thread_pkey_regs_save(t);
 }
 
 static inline void restore_sprs(struct thread_struct *old_thread,
@@ -1202,7 +1199,6 @@ static inline void restore_sprs(struct thread_struct *old_thread,
 		mtspr(SPRN_TIDR, new_thread->tidr);
 #endif
 
-	thread_pkey_regs_restore(new_thread, old_thread);
 }
 
 struct task_struct *__switch_to(struct task_struct *prev,
@@ -1530,10 +1526,37 @@ void flush_thread(void)
 #ifdef CONFIG_PPC_BOOK3S_64
 void arch_setup_new_exec(void)
 {
-	if (radix_enabled())
-		return;
-	hash__setup_new_exec();
+	if (!radix_enabled())
+		hash__setup_new_exec();
+
+	/*
+	 * If we exec out of a kernel thread then thread.regs will not be
+	 * set.  Do it now.
+	 */
+	if (!current->thread.regs) {
+		struct pt_regs *regs = task_stack_page(current) + THREAD_SIZE;
+		current->thread.regs = regs - 1;
+	}
+
+#ifdef CONFIG_PPC_MEM_KEYS
+	current->thread.regs->amr  = default_amr;
+	current->thread.regs->iamr  = default_iamr;
+#endif
+
 }
+#else
+void arch_setup_new_exec(void)
+{
+	/*
+	 * If we exec out of a kernel thread then thread.regs will not be
+	 * set.  Do it now.
+	 */
+	if (!current->thread.regs) {
+		struct pt_regs *regs = task_stack_page(current) + THREAD_SIZE;
+		current->thread.regs = regs - 1;
+	}
+}
+
 #endif
 
 #ifdef CONFIG_PPC64
@@ -1747,6 +1770,16 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 
 	p->thread.tidr = 0;
 #endif
+	/*
+	 * Run with the current AMR value of the kernel
+	 */
+#ifdef CONFIG_PPC_PKEY
+	if (mmu_has_feature(MMU_FTR_KUAP))
+		kregs->amr = AMR_KUAP_BLOCKED;
+
+	if (mmu_has_feature(MMU_FTR_KUEP))
+		kregs->iamr = AMR_KUEP_BLOCKED;
+#endif
 	kregs->nip = ppc_function_entry(f);
 	return 0;
 }
@@ -1764,15 +1797,6 @@ void start_thread(struct pt_regs *regs, unsigned long start, unsigned long sp)
 	if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) && !radix_enabled())
 		preload_new_slb_context(start, sp);
 #endif
-
-	/*
-	 * If we exec out of a kernel thread then thread.regs will not be
-	 * set.  Do it now.
-	 */
-	if (!current->thread.regs) {
-		struct pt_regs *regs = task_stack_page(current) + THREAD_SIZE;
-		current->thread.regs = regs - 1;
-	}
 
 #ifdef CONFIG_PPC_TRANSACTIONAL_MEM
 	/*
@@ -1878,7 +1902,6 @@ void start_thread(struct pt_regs *regs, unsigned long start, unsigned long sp)
 	current->thread.load_tm = 0;
 #endif /* CONFIG_PPC_TRANSACTIONAL_MEM */
 
-	thread_pkey_regs_init(&current->thread);
 }
 EXPORT_SYMBOL(start_thread);
 
